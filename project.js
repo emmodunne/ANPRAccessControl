@@ -2,6 +2,7 @@ var sys = require('sys'),
     exec = require('child_process').exec;
 var mysql = require('mysql');
 var mqtt = require('mqtt');
+var player = require('play-sound')(opts = {})
 
 // Define connection parameters for connecting MySQL Database
 var con = mysql.createConnection({
@@ -28,7 +29,7 @@ con.connect(function(err) {
 	console.log('Connected to MySQL AnprAccessControl Database');  
 	client.on('connect', function() { // When 'connect' event is received, this anonymous callback listener function is called  
 		console.log('Connected to CloudMQTT Broker');
-		setInterval(mainLoop, 5000);
+		setInterval(mainLoop, 6000);
 		
 		function mainLoop() {
 			console.log("Attempting to Capture Image from Webcam...");
@@ -59,8 +60,6 @@ con.connect(function(err) {
 								else {
 									//Create a json object based on the standard alpr output
 									var plateOutput = JSON.parse(stdout.toString());	
-									//log the response from alpr
-									console.log('Output' + stdout.toString());
 									if (plateOutput.results.length == 0){
 										console.log('No Reg Plates Found in Image');
 									}
@@ -75,26 +74,50 @@ con.connect(function(err) {
 												console.log('Vehicle Reg Plate is not in AllowedRegPlates Table');
 												client.publish('AnprAccessControl/Alert', actualIrishPlate, function() {    
 													console.log('Alert for Unrecognised Reg Plate ' + actualIrishPlate + ' has been Published');
+													client.subscribe('AnprAccessControl/Resolution', function() { //Subscribe to 'AnprAccessControl/Resolution' topic and once subscribed this anonymous callback listener fuction is called
 													function loopForResolutionMessage() {
-														client.subscribe('AnprAccessControl/Resolution', function() { //Subscribe to 'AnprAccessControl/Resolution' topic and once subscribed this anonymous callback listener fuction is called
 															console.log("Waiting for a Resolution Message from Client... ");
 															// When a message arrives from the MQTT broker
 															client.on('message', function(topic, message, packet) {
 																console.log(message);
 																if (message == 'Allowed'){
 																	console.log('Vehicle with Reg Plate ' + actualIrishPlate + 'has been Granted Access');
+																	var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, AccessGranted) VALUES ('" + actualIrishPlate + "', '1')";
+																	con.query(sql, function (err, result) {
+																		if (err) throw err;
+																		console.log("Log Record inserted into RegPlatesLog");
+																	});
+																	player.play('sounds/welcome.mp3', function(err){
+																		if (err) throw err
+																		console.log("Playing Welcome Sound");
+																	});
 																}
 																else {
 																	console.log('Vehicle with Reg Plate ' + actualIrishPlate + 'has been Denied Access');
+																	var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, AccessGranted) VALUES ('" + actualIrishPlate + "', '0')";
+																	con.query(sql, function (err, result) {
+																		if (err) throw err;
+																		console.log("Log Record inserted into RegPlatesLog");
+																	});
 																}	
 															});
-														});
 													}
 													setTimeout(loopForResolutionMessage, 10000);
+													});
+													
 												});
 											}
 											else {
 												console.log('Vehicle Reg Plate is in AllowedRegPlates Table');
+												var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, AccessGranted) VALUES ('" + actualIrishPlate + "', '1')";
+												con.query(sql, function (err, result) {
+													if (err) throw err;
+													console.log("Log Record inserted into RegPlatesLog");
+												});
+												player.play('sounds/welcome.mp3', function(err){
+													if (err) throw err
+													console.log("Playing Welcome Sound");
+												});
 											}
 										});
 									}
