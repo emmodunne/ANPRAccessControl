@@ -23,24 +23,28 @@ var options = {
 // Connect to MQTT broker
 var client  = mqtt.connect('mqtt://m21.cloudmqtt.com', options)
 
+//Global Variables
+var seconds = 0;
+var actualIrishPlate;
+var resolutionReceived;
 
 con.connect(function(err) {
 	if (err) throw err;
 	console.log('Connected to MySQL AnprAccessControl Database');  
 	client.on('connect', function() { // When 'connect' event is received, this anonymous callback listener function is called  
 		console.log('Connected to CloudMQTT Broker');
-		setInterval(mainLoop, 6000);
+		mainLoop();
 		
 		function mainLoop() {
-			console.log("Attempting to Capture Image from Webcam...");
-			//Tell the webcam to take a picture and store it in the webcam directory using capture as the name
+			console.log('Attempting to Capture an Image from Webcam...');
+				//Tell the webcam to take a picture and store it in the webcam directory using capture as the name
 			exec('fswebcam -r 640x480 --no-banner --quiet /home/pi/Desktop/anprproject/webcam/capture.jpg', 
 				function (error, stdout, stderr) {
 					if (error !== null) {
 						//Log any execution errors
 						console.log('Webcam Execution Error: ' + error);
 					}
-					else if (stderr != ''){
+					else if (stderr != '') {
 						//Log any standard errors
 						console.log('Webcam Standard Error: ' + stderr);	
 					}
@@ -60,80 +64,120 @@ con.connect(function(err) {
 								else {
 									//Create a json object based on the standard alpr output
 									var plateOutput = JSON.parse(stdout.toString());	
-									if (plateOutput.results.length == 0){
+									//Hack #1: Return 1 from plateOutput.results.length
+									plateOutput.results.length = 1;
+									if (plateOutput.results.length == 0) {
 										console.log('No Reg Plates Found in Image');
 									}
 									else if (plateOutput.results.length == 1){
-										console.log('Original Plate: ' + plateOutput.results[0].plate);
-										var actualIrishPlate = plateOutput.results[0].plate.replace(/I/g,'1');
+										//Hack #2: Hardcode actualIrishPlate instead of getting it from JSON blob
+										//console.log('Original Plate: ' + plateOutput.results[0].plate);
+										//var actualIrishPlate = plateOutput.results[0].plate.replace(/I/g,'1');
+										actualIrishPlate = "141D35066";
 										console.log('1 Reg Plate Found in Image: ' + actualIrishPlate);
+										console.log('Checking if Detected Reg Plate is in AllowedRegPlates Table...');
 										con.query('SELECT COUNT(*) AS MatchingAllowedRegPlateCount FROM AllowedRegPlates WHERE RegPlate = "' + actualIrishPlate + '"', function (err, result) {
-											console.log('Checking if Detected Reg Plate is in AllowedRegPlates Table...');
 											if (err) throw err;
 											if (result[0].MatchingAllowedRegPlateCount == 0) {
 												console.log('Vehicle Reg Plate is not in AllowedRegPlates Table');
 												client.publish('AnprAccessControl/Alert', actualIrishPlate, function() {    
 													console.log('Alert for Unrecognised Reg Plate ' + actualIrishPlate + ' has been Published');
-													client.subscribe('AnprAccessControl/Resolution', function() { //Subscribe to 'AnprAccessControl/Resolution' topic and once subscribed this anonymous callback listener fuction is called
-													function loopForResolutionMessage() {
-															console.log("Waiting for a Resolution Message from Client... ");
-															// When a message arrives from the MQTT broker
-															client.on('message', function(topic, message, packet) {
-																console.log(message);
-																if (message == 'Allowed'){
-																	console.log('Vehicle with Reg Plate ' + actualIrishPlate + 'has been Granted Access');
-																	var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, AccessGranted) VALUES ('" + actualIrishPlate + "', '1')";
-																	con.query(sql, function (err, result) {
-																		if (err) throw err;
-																		console.log("Log Record inserted into RegPlatesLog");
-																	});
-																	player.play('sounds/welcome.mp3', function(err){
-																		if (err) throw err
-																		console.log("Playing Welcome Sound");
-																	});
-																}
-																else {
-																	console.log('Vehicle with Reg Plate ' + actualIrishPlate + 'has been Denied Access');
-																	var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, AccessGranted) VALUES ('" + actualIrishPlate + "', '0')";
-																	con.query(sql, function (err, result) {
-																		if (err) throw err;
-																		console.log("Log Record inserted into RegPlatesLog");
-																	});
-																}	
-															});
-													}
-													setTimeout(loopForResolutionMessage, 10000);
+													//Subscribe to 'AnprAccessControl/Resolution' topic and once subscribed this anonymous callback listener fuction is called
+													client.subscribe('AnprAccessControl/Resolution', function() {
+														resolutionReceived = false;
+														seconds = 0;
+														console.log('Waiting for a Resolution Message from Client...');			
 													});
-													
 												});
 											}
 											else {
-												console.log('Vehicle Reg Plate is in AllowedRegPlates Table');
-												var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, AccessGranted) VALUES ('" + actualIrishPlate + "', '1')";
+												console.log('\nVehicle Reg Plate is in AllowedRegPlates Table');
+												var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + actualIrishPlate + "', 'Grant')";
 												con.query(sql, function (err, result) {
 													if (err) throw err;
-													console.log("Log Record inserted into RegPlatesLog");
+													console.log('Log Record inserted into RegPlatesLog\n');
+													player.play('sounds/AccessGranted.mp3', function(err) {
+														if (err) throw err
+														console.log("Playing Access Granted Sound");
+														mainLoop();
+													});
 												});
-												player.play('sounds/welcome.mp3', function(err){
-													if (err) throw err
-													console.log("Playing Welcome Sound");
-												});
+												mainLoop();
 											}
 										});
 									}
 									else {
-										console.log('Too Many Reg Plates Found in Image');
+										console.log('Too Many Reg Plates Found in the Captured Image');
 									}
-									console.log('Image Processing Time: ' + plateOutput.processing_time_ms);	
+									console.log('Image Processing Time: ' + plateOutput.processing_time_ms);		
 								}
 							});
-						}	
+					}	
 				});
 		}
+		
+		setInterval(function(){
+			seconds++;
+			if(seconds == 10 && resolutionReceived == false) {
+				client.publish('AnprAccessControl/Resolution', 'None', function() {
+					console.log('\nTimeout: Published a None Resolution for ' + actualIrishPlate);
+				});
+			}
+			if(seconds == 10) {
+				client.unsubscribe('AnprAccessControl/Resolution', function() {
+				});
+			}
+
+		}, 1000);
+		
+		client.on('message', function(topic, message, packet) {
+			if (message.toString() == 'Grant') {
+				resolutionReceived = true;
+				console.log('\nResolution Received from Client: ' + message.toString());
+				console.log('Vehicle with Reg Plate ' + actualIrishPlate + ' has been Granted Access');
+				var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + actualIrishPlate + "', 'Grant')";
+				con.query(sql, function (err, result) {
+					if (err) throw err;
+					console.log("Log Record inserted into RegPlatesLog");
+					player.play('sounds/AccessGranted.mp3', function(err){
+						if (err) throw err
+						console.log("Playing Access Granted Sound\n");
+						mainLoop();
+					});
+				});
+				
+				
+			}
+			else if (message.toString() == 'Deny') {
+				resolutionReceived = true;
+				console.log('\nResolution Received from Client: ' + message.toString());
+				console.log('Vehicle with Reg Plate ' + actualIrishPlate + ' has been Denied Access');
+				var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + actualIrishPlate + "', 'Deny')";
+				con.query(sql, function (err, result) {
+					if (err) throw err;
+					console.log('Log Record inserted into RegPlatesLog');
+					player.play('sounds/AccessDenied.mp3', function(err) {
+						if (err) throw err
+						console.log("Playing Access Denied Sound\n");
+						mainLoop();
+					});
+				});
+			}
+			else if (message.toString() == 'None') {
+				console.log('\nResolution Received from Client: ' + message.toString());
+				console.log('Vehicle with Reg Plate ' + actualIrishPlate + ' has been Denied Access');
+				var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + actualIrishPlate + "', 'None')";
+				con.query(sql, function (err, result) {
+					if (err) throw err;
+					console.log('Log Record inserted into RegPlatesLog');
+					player.play('sounds/AccessDenied.mp3', function(err) {
+						if (err) throw err
+						console.log("Playing Access Denied Sound\n");
+						mainLoop();
+					});
+				});
+			}
+		});
+
 	});	
-});	
-
-
-
-	
-	
+});
