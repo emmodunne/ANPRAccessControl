@@ -25,14 +25,15 @@ var client  = mqtt.connect('mqtt://m21.cloudmqtt.com', options)
 
 //Global Variables
 var seconds = 0;
-var actualIrishPlate;
+var currentIrishPlate;
+var previousIrishPlate;
 var resolutionReceived;
 
 con.connect(function(err) {
 	if (err) throw err;
 	console.log('Connected to MySQL AnprAccessControl Database');  
 	client.on('connect', function() { // When 'connect' event is received, this anonymous callback listener function is called  
-		console.log('Connected to CloudMQTT Broker');
+		console.log('Connected to CloudMQTT Broker\n');
 		mainLoop();
 		
 		function mainLoop() {
@@ -65,51 +66,57 @@ con.connect(function(err) {
 									//Create a json object based on the standard alpr output
 									var plateOutput = JSON.parse(stdout.toString());	
 									//Hack #1: Return 1 from plateOutput.results.length
-									plateOutput.results.length = 1;
+									//plateOutput.results.length = 1;
 									if (plateOutput.results.length == 0) {
-										console.log('No Reg Plates Found in Image');
+										console.log('No Reg Plates Found in Image\n');
+										mainLoop();
 									}
-									else if (plateOutput.results.length == 1){
-										//Hack #2: Hardcode actualIrishPlate instead of getting it from JSON blob
-										//console.log('Original Plate: ' + plateOutput.results[0].plate);
-										//var actualIrishPlate = plateOutput.results[0].plate.replace(/I/g,'1');
-										actualIrishPlate = "141D35066";
-										console.log('1 Reg Plate Found in Image: ' + actualIrishPlate);
-										console.log('Checking if Detected Reg Plate is in AllowedRegPlates Table...');
-										con.query('SELECT COUNT(*) AS MatchingAllowedRegPlateCount FROM AllowedRegPlates WHERE RegPlate = "' + actualIrishPlate + '"', function (err, result) {
-											if (err) throw err;
-											if (result[0].MatchingAllowedRegPlateCount == 0) {
-												console.log('Vehicle Reg Plate is not in AllowedRegPlates Table');
-												client.publish('AnprAccessControl/Alert', actualIrishPlate, function() {    
-													console.log('Alert for Unrecognised Reg Plate ' + actualIrishPlate + ' has been Published');
-													//Subscribe to 'AnprAccessControl/Resolution' topic and once subscribed this anonymous callback listener fuction is called
-													client.subscribe('AnprAccessControl/Resolution', function() {
-														resolutionReceived = false;
-														seconds = 0;
-														console.log('Waiting for a Resolution Message from Client...');			
+									else if (plateOutput.results.length == 1) {
+										//Hack #2: Hardcode currentIrishPlate instead of getting it from JSON blob
+										console.log('Original Plate: ' + plateOutput.results[0].plate);
+										currentIrishPlate = plateOutput.results[0].plate.replace(/I/g,'1');
+										//currentIrishPlate = "141D35066";
+										console.log('1 Reg Plate Found in Image: ' + currentIrishPlate);
+										if (currentIrishPlate == previousIrishPlate) {
+											console.log('Same Reg Plate as previous\n');
+											mainLoop();
+										}
+										else {
+											console.log('Checking if Detected Reg Plate is in AllowedRegPlates Table...');
+											con.query('SELECT COUNT(*) AS MatchingAllowedRegPlateCount FROM AllowedRegPlates WHERE RegPlate = "' + currentIrishPlate + '"', function (err, result) {
+												if (err) throw err;
+												if (result[0].MatchingAllowedRegPlateCount == 0) {
+													console.log('Vehicle Reg Plate is not in AllowedRegPlates Table');
+													client.publish('AnprAccessControl/Alert', currentIrishPlate, function() {    
+														console.log('Alert for Unrecognised Reg Plate ' + currentIrishPlate + ' has been Published');
+														//Subscribe to 'AnprAccessControl/Resolution' topic and once subscribed this anonymous callback listener fuction is called
+														client.subscribe('AnprAccessControl/Resolution', function() {
+															resolutionReceived = false;
+															seconds = 0;
+															console.log('Waiting for a Resolution Message from Client...');			
+														});
 													});
-												});
-											}
-											else {
-												console.log('\nVehicle Reg Plate is in AllowedRegPlates Table');
-												var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + actualIrishPlate + "', 'Grant')";
-												con.query(sql, function (err, result) {
-													if (err) throw err;
-													console.log('Log Record inserted into RegPlatesLog\n');
-													player.play('sounds/AccessGranted.mp3', function(err) {
-														if (err) throw err
-														console.log("Playing Access Granted Sound");
-														mainLoop();
+												}
+												else {
+													console.log('\nVehicle Reg Plate is in AllowedRegPlates Table');
+													var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + currentIrishPlate + "', 'Grant')";
+													con.query(sql, function (err, result) {
+														if (err) throw err;
+														console.log('Log Record inserted into RegPlatesLog\n');
+														player.play('sounds/AccessGranted.mp3', function(err) {
+															if (err) throw err
+															console.log("Playing Access Granted Sound");
+															previousIrishPlate = currentIrishPlate;
+															mainLoop();
+														});
 													});
-												});
-												mainLoop();
-											}
-										});
+												}
+											});
+										}
 									}
 									else {
 										console.log('Too Many Reg Plates Found in the Captured Image');
-									}
-									console.log('Image Processing Time: ' + plateOutput.processing_time_ms);		
+									}	
 								}
 							});
 					}	
@@ -120,7 +127,7 @@ con.connect(function(err) {
 			seconds++;
 			if(seconds == 10 && resolutionReceived == false) {
 				client.publish('AnprAccessControl/Resolution', 'None', function() {
-					console.log('\nTimeout: Published a None Resolution for ' + actualIrishPlate);
+					console.log('\nTimeout: Published a None Resolution for ' + currentIrishPlate);
 				});
 			}
 			if(seconds == 10) {
@@ -134,8 +141,8 @@ con.connect(function(err) {
 			if (message.toString() == 'Grant') {
 				resolutionReceived = true;
 				console.log('\nResolution Received from Client: ' + message.toString());
-				console.log('Vehicle with Reg Plate ' + actualIrishPlate + ' has been Granted Access');
-				var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + actualIrishPlate + "', 'Grant')";
+				console.log('Vehicle with Reg Plate ' + currentIrishPlate + ' has been Granted Access');
+				var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + currentIrishPlate + "', 'Grant')";
 				con.query(sql, function (err, result) {
 					if (err) throw err;
 					console.log("Log Record inserted into RegPlatesLog");
@@ -151,8 +158,8 @@ con.connect(function(err) {
 			else if (message.toString() == 'Deny') {
 				resolutionReceived = true;
 				console.log('\nResolution Received from Client: ' + message.toString());
-				console.log('Vehicle with Reg Plate ' + actualIrishPlate + ' has been Denied Access');
-				var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + actualIrishPlate + "', 'Deny')";
+				console.log('Vehicle with Reg Plate ' + currentIrishPlate + ' has been Denied Access');
+				var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + currentIrishPlate + "', 'Deny')";
 				con.query(sql, function (err, result) {
 					if (err) throw err;
 					console.log('Log Record inserted into RegPlatesLog');
@@ -165,8 +172,8 @@ con.connect(function(err) {
 			}
 			else if (message.toString() == 'None') {
 				console.log('\nResolution Received from Client: ' + message.toString());
-				console.log('Vehicle with Reg Plate ' + actualIrishPlate + ' has been Denied Access');
-				var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + actualIrishPlate + "', 'None')";
+				console.log('Vehicle with Reg Plate ' + currentIrishPlate + ' has been Denied Access');
+				var sql = "INSERT INTO RegPlatesLog (RegPlateDetected, Action) VALUES ('" + currentIrishPlate + "', 'None')";
 				con.query(sql, function (err, result) {
 					if (err) throw err;
 					console.log('Log Record inserted into RegPlatesLog');
@@ -177,6 +184,7 @@ con.connect(function(err) {
 					});
 				});
 			}
+			previousIrishPlate = currentIrishPlate;
 		});
 
 	});	
